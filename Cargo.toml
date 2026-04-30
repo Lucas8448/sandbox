@@ -1,6 +1,6 @@
 [package]
 name = "physics_sandbox"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Small rigid-body physics sandbox with pluggable integrators, environments, collisions and an event bus. Optional retro ASCII terminal visualization."
@@ -25,6 +25,14 @@ required-features = ["viz"]
 
 [[example]]
 name = "missile_viz_3d"
+required-features = ["viz"]
+
+[[example]]
+name = "missile_multiview"
+required-features = ["viz"]
+
+[[example]]
+name = "missile_svg"
 required-features = ["viz"]
 
 [package.metadata.docs.rs]

@@ -51,7 +51,7 @@ fn main() -> std::io::Result<()> {
 
     let mut scope = AsciiScope::new_3d(110, 34, initial_camera)
         .with_trails(true)
-        .with_ground_grid(GroundGrid::new(20_000.0, 2_000.0));
+        .with_ground_grid(GroundGrid::new(20_000.0, 2_500.0));
 
     prepare_terminal()?;
 
@@ -86,8 +86,14 @@ fn main() -> std::io::Result<()> {
                 Camera::looking_at(cam_eye, orbit_center).with_fov_deg(55.0),
             );
 
-            let glyph = if t < 3.0 { '^' } else { '*' };
-            let color = if t < 3.0 { Color::Red } else { Color::Yellow };
+            // Bright green missile, glyph carries phase information:
+            //   ▲  thrust burning   (lift-off / boost phase)
+            //   ●  ballistic         (engine off, coasting)
+            let (glyph, color) = if t < 3.0 {
+                ('\u{25B2}', Color::Rgb { r: 60, g: 255, b: 90 })
+            } else {
+                ('\u{25CF}', Color::Rgb { r: 60, g: 255, b: 90 })
+            };
             let marker = Marker::new3(body.position, glyph).with_color(color);
 
             scope.draw(&[marker])?;
@@ -115,9 +121,9 @@ fn main() -> std::io::Result<()> {
     let body = world.body(missile_id);
     let final_marker = Marker::new3(
         Vec3::new(body.position.x, body.position.y.max(0.0), body.position.z),
-        'X',
+        '\u{2739}', // ✹ a bright burst at impact
     )
-    .with_color(Color::Magenta);
+    .with_color(Color::Rgb { r: 120, g: 255, b: 140 });
     scope.draw(&[final_marker])?;
 
     restore_terminal()?;
