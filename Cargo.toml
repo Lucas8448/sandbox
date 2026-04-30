@@ -35,6 +35,10 @@ required-features = ["viz"]
 name = "missile_svg"
 required-features = ["viz"]
 
+[[example]]
+name = "drones_formation"
+required-features = ["viz"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

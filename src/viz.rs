@@ -1133,3 +1133,258 @@ fn xml_escape<S: AsRef<str>>(s: S) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
+
+// ---------------------------------------------------------------------------
+// MultiRecorder — N independently-labeled tracks rendered on one SVG.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct Track {
+    pub label: String,
+    /// Any valid SVG stroke color (e.g. "#5cff90", "tomato", "rgb(...)").
+    pub color: String,
+    pub samples: Vec<TraceSample>,
+}
+
+/// Records multiple parallel trajectories (e.g. drones in formation) and
+/// exports them all to a single SVG with a shared coordinate system. Each
+/// track is drawn in its own color; phase information on samples is
+/// ignored (use `Recorder` directly if you want boost/coast coloring).
+#[derive(Debug, Clone, Default)]
+pub struct MultiRecorder {
+    pub label: String,
+    pub tracks: Vec<Track>,
+}
+
+impl MultiRecorder {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self { label: label.into(), tracks: Vec::new() }
+    }
+
+    /// Allocate a new track and return its index. Color is any SVG color
+    /// string. Subsequent `push(idx, ..)` calls append samples to it.
+    pub fn add_track(&mut self, label: impl Into<String>, color: impl Into<String>) -> usize {
+        let idx = self.tracks.len();
+        self.tracks.push(Track {
+            label: label.into(),
+            color: color.into(),
+            samples: Vec::new(),
+        });
+        idx
+    }
+
+    pub fn push(&mut self, track: usize, t: f64, pos: Vec3) {
+        self.tracks[track].samples.push(TraceSample {
+            t,
+            pos,
+            phase: TracePhase::Coast,
+        });
+    }
+
+    pub fn export_svg(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        if self.tracks.iter().all(|t| t.samples.is_empty()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "no samples recorded in any track",
+            ));
+        }
+
+        let all_samples = || self.tracks.iter().flat_map(|t| t.samples.iter());
+        let (xmin, xmax) = bounds(all_samples().map(|s| s.pos.x));
+        let (_ymin, ymax) = bounds(all_samples().map(|s| s.pos.y));
+        let (zmin, zmax) = bounds(all_samples().map(|s| s.pos.z));
+
+        let span_x = (xmax - xmin).max(1.0);
+        let span_y = (ymax.max(0.0)).max(1.0);
+        let span_z = (zmax - zmin).max(1.0);
+        let raw_span = span_x.max(span_y).max(span_z) * 1.1;
+        let span = nice_ceil(raw_span);
+        let step = span / 5.0;
+        let snap = |c: f64| (c / step).round() * step;
+        let x_center = snap((xmin + xmax) * 0.5);
+        let z_center = snap((zmin + zmax) * 0.5);
+        let xr = if xmin >= 0.0 {
+            (0.0_f64, span)
+        } else {
+            (x_center - span * 0.5, x_center + span * 0.5)
+        };
+        let yr = (0.0_f64, span);
+        let zr = if zmin >= 0.0 {
+            (0.0_f64, span)
+        } else {
+            (z_center - span * 0.5, z_center + span * 0.5)
+        };
+
+        let pw = 560.0_f64;
+        let ph = 560.0_f64;
+        let margin = 60.0_f64;
+        let total_w = (pw * 2.0 + margin * 3.0) as i32;
+        let total_h = (ph * 2.0 + margin * 3.0) as i32;
+
+        let mut s = String::new();
+        s.push_str(&format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\">\n",
+            w = total_w,
+            h = total_h
+        ));
+        s.push_str("<style>\n");
+        s.push_str(
+            "  .bg { fill: #0c1116; }\n\
+             .panel { fill: #11161c; stroke: #2a3340; stroke-width: 1; }\n\
+             .grid { stroke: #1c2430; stroke-width: 1; }\n\
+             .axis { stroke: #4a5260; stroke-width: 1; }\n\
+             .ground { stroke: #6b5a26; stroke-width: 1.5; stroke-dasharray: 4 3; }\n\
+             .tick { fill: #7a8290; font: 11px monospace; }\n\
+             .title { fill: #d6deea; font: 14px monospace; font-weight: bold; }\n\
+             .subtitle { fill: #7a8290; font: 11px monospace; }\n\
+             .summary { fill: #d6deea; font: 13px monospace; }\n\
+             .summary-dim { fill: #7a8290; font: 12px monospace; }\n\
+             .track { fill: none; stroke-width: 1.8; }\n\
+             .start { stroke-width: 1.2; }\n\
+             .end { stroke-width: 1.0; }\n",
+        );
+        s.push_str("</style>\n");
+        s.push_str(&format!("<rect class=\"bg\" width=\"{}\" height=\"{}\" />\n", total_w, total_h));
+
+        let tracks = &self.tracks;
+        let draw_panel = |s: &mut String, px: f64, py: f64, title: &str,
+                          xa: Axis, ya: Axis, xr: (f64, f64), yr: (f64, f64),
+                          show_ground: bool| {
+            s.push_str(&format!("<g transform=\"translate({px},{py})\">\n", px = px, py = py));
+            s.push_str(&format!("<rect class=\"panel\" width=\"{}\" height=\"{}\" />\n", pw, ph));
+            s.push_str(&format!("<text class=\"title\" x=\"10\" y=\"18\">{}</text>\n", xml_escape(title)));
+            s.push_str(&format!(
+                "<text class=\"subtitle\" x=\"10\" y=\"32\">{} -&gt; {} (horiz),  {} -&gt; {} (vert)</text>\n",
+                xa.label(), short_axis_label(xa), ya.label(), short_axis_label(ya),
+            ));
+
+            let inset_l = 60.0;
+            let inset_r = 20.0;
+            let inset_t = 50.0;
+            let inset_b = 40.0;
+            let plot_size = (pw - inset_l - inset_r).min(ph - inset_t - inset_b);
+            let plot_l = inset_l;
+            let plot_r = plot_l + plot_size;
+            let plot_t = inset_t;
+            let plot_b = plot_t + plot_size;
+            let map_x = |v: f64| plot_l + (v - xr.0) / (xr.1 - xr.0) * (plot_r - plot_l);
+            let map_y = |v: f64| plot_b - (v - yr.0) / (yr.1 - yr.0) * (plot_b - plot_t);
+
+            for i in 0..=5 {
+                let t = i as f64 / 5.0;
+                let xv = xr.0 + t * (xr.1 - xr.0);
+                let yv = yr.0 + t * (yr.1 - yr.0);
+                let xpix = map_x(xv);
+                let ypix = map_y(yv);
+                s.push_str(&format!("<line class=\"grid\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" />\n", xpix, plot_t, xpix, plot_b));
+                s.push_str(&format!("<line class=\"grid\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" />\n", plot_l, ypix, plot_r, ypix));
+                s.push_str(&format!("<text class=\"tick\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>\n", xpix, plot_b + 14.0, fmt_si(xv)));
+                s.push_str(&format!("<text class=\"tick\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"end\">{}</text>\n", plot_l - 4.0, ypix + 4.0, fmt_si(yv)));
+            }
+            s.push_str(&format!("<line class=\"axis\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" />\n", plot_l, plot_t, plot_l, plot_b));
+            s.push_str(&format!("<line class=\"axis\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" />\n", plot_l, plot_b, plot_r, plot_b));
+            if show_ground && yr.0 <= 0.0 && yr.1 >= 0.0 {
+                let yz = map_y(0.0);
+                s.push_str(&format!("<line class=\"ground\" x1=\"{:.1}\" y1=\"{:.1}\" x2=\"{:.1}\" y2=\"{:.1}\" />\n", plot_l, yz, plot_r, yz));
+            }
+
+            // One polyline per track, in track color.
+            for track in tracks.iter() {
+                if track.samples.len() < 2 { continue; }
+                let mut d = String::new();
+                for (i, sample) in track.samples.iter().enumerate() {
+                    let xv = xa.pick(sample.pos);
+                    let yv = ya.pick(sample.pos);
+                    let px = map_x(xv);
+                    let py = map_y(yv);
+                    if i == 0 {
+                        d.push_str(&format!("M {:.1} {:.1}", px, py));
+                    } else {
+                        d.push_str(&format!(" L {:.1} {:.1}", px, py));
+                    }
+                }
+                s.push_str(&format!(
+                    "<path class=\"track\" stroke=\"{}\" d=\"{}\" />\n",
+                    xml_escape(&track.color), d,
+                ));
+                // Start marker (hollow ring) and end marker (filled dot).
+                let first = track.samples.first().unwrap();
+                let last = track.samples.last().unwrap();
+                let (sx, sy) = (map_x(xa.pick(first.pos)), map_y(ya.pick(first.pos)));
+                let (ex, ey) = (map_x(xa.pick(last.pos)), map_y(ya.pick(last.pos)));
+                s.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.4\" />\n",
+                    sx, sy, xml_escape(&track.color)
+                ));
+                s.push_str(&format!(
+                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"{}\" />\n",
+                    ex, ey, xml_escape(&track.color)
+                ));
+            }
+
+            s.push_str("</g>\n");
+        };
+
+        let p_side = (margin, margin);
+        let p_top = (margin * 2.0 + pw, margin);
+        let p_front = (margin, margin * 2.0 + ph);
+        let p_summary = (margin * 2.0 + pw, margin * 2.0 + ph);
+
+        draw_panel(&mut s, p_side.0, p_side.1, "SIDE  X x Y", Axis::X, Axis::Y, xr, yr, true);
+        draw_panel(&mut s, p_top.0, p_top.1, "TOP   X x Z", Axis::X, Axis::Z, xr, zr, false);
+        draw_panel(&mut s, p_front.0, p_front.1, "FRONT Z x Y", Axis::Z, Axis::Y, zr, yr, true);
+
+        // Summary panel.
+        let label = if self.label.is_empty() { "Tracks".to_string() } else { self.label.clone() };
+        s.push_str(&format!("<g transform=\"translate({px},{py})\">\n", px = p_summary.0, py = p_summary.1));
+        s.push_str(&format!("<rect class=\"panel\" width=\"{}\" height=\"{}\" />\n", pw, ph));
+        s.push_str(&format!("<text class=\"title\" x=\"20\" y=\"38\">{}</text>\n", xml_escape(&label)));
+
+        let total_samples: usize = self.tracks.iter().map(|t| t.samples.len()).sum();
+        let duration = self
+            .tracks
+            .iter()
+            .filter_map(|t| t.samples.last().map(|s| s.t))
+            .fold(0.0_f64, f64::max);
+
+        let header = [
+            format!("tracks        : {}", self.tracks.len()),
+            format!("total samples : {}", total_samples),
+            format!("duration      : {:.2} s", duration),
+            String::new(),
+            "legend:".to_string(),
+        ];
+        for (i, line) in header.iter().enumerate() {
+            let class = if line.starts_with("legend") { "summary-dim" } else { "summary" };
+            s.push_str(&format!(
+                "<text class=\"{}\" x=\"20\" y=\"{}\">{}</text>\n",
+                class, 70.0 + i as f64 * 22.0, xml_escape(line),
+            ));
+        }
+        let mut y = 70.0 + header.len() as f64 * 22.0;
+        for track in &self.tracks {
+            let last_pos = track.samples.last().map(|s| s.pos).unwrap_or(Vec3::zero());
+            s.push_str(&format!(
+                "<line x1=\"30\" y1=\"{:.1}\" x2=\"60\" y2=\"{:.1}\" stroke=\"{}\" stroke-width=\"2.2\" />\n",
+                y, y, xml_escape(&track.color),
+            ));
+            s.push_str(&format!(
+                "<circle cx=\"45\" cy=\"{:.1}\" r=\"3.5\" fill=\"{}\" />\n",
+                y, xml_escape(&track.color),
+            ));
+            s.push_str(&format!(
+                "<text class=\"summary-dim\" x=\"70\" y=\"{:.1}\">{:<9}  end ({:.0}, {:.0}, {:.0}) m  ({} samples)</text>\n",
+                y + 4.0,
+                xml_escape(&track.label),
+                last_pos.x, last_pos.y, last_pos.z,
+                track.samples.len(),
+            ));
+            y += 22.0;
+            if y > ph - 20.0 { break; }
+        }
+        s.push_str("</g>\n");
+        s.push_str("</svg>\n");
+
+        std::fs::write(path, s)
+    }
+}
