@@ -826,19 +826,32 @@ impl Recorder {
         let (zmin, zmax) = bounds(self.samples.iter().map(|s| s.pos.z));
 
         // Equalize axis scales: every panel's m-per-pixel must match, so we
-        // pick the largest data span across X/Y/Z and use a window of that
-        // size for every axis. Y is anchored at the ground (y=0) so the
-        // ground line stays at the bottom of altitude panels; X and Z are
-        // centered on their data midpoints.
+        // pick the largest data span across X/Y/Z, snap it up to a nice
+        // round number, and use a window of that size for every axis.
+        // Each axis is anchored so a 0 tick lands on the grid where
+        // possible (Y always anchored at 0; X/Z anchored to the nearest
+        // tick step around their data midpoint, which usually lands 0 on
+        // the grid too).
         let span_x = (xmax - xmin).max(1.0);
-        let span_y = (ymax.max(0.0)).max(1.0); // anchored at 0
+        let span_y = (ymax.max(0.0)).max(1.0);
         let span_z = (zmax - zmin).max(1.0);
-        let span = span_x.max(span_y).max(span_z) * 1.1;
-        let mid_x = (xmin + xmax) * 0.5;
-        let mid_z = (zmin + zmax) * 0.5;
-        let xr = (mid_x - span * 0.5, mid_x + span * 0.5);
+        let raw_span = span_x.max(span_y).max(span_z) * 1.1;
+        let span = nice_ceil(raw_span);
+        let step = span / 5.0;
+        let snap = |c: f64| (c / step).round() * step;
+        let x_center = snap((xmin + xmax) * 0.5);
+        let z_center = snap((zmin + zmax) * 0.5);
+        let xr = if xmin >= 0.0 {
+            (0.0_f64, span)
+        } else {
+            (x_center - span * 0.5, x_center + span * 0.5)
+        };
         let yr = (0.0_f64, span);
-        let zr = (mid_z - span * 0.5, mid_z + span * 0.5);
+        let zr = if zmin >= 0.0 {
+            (0.0_f64, span)
+        } else {
+            (z_center - span * 0.5, z_center + span * 0.5)
+        };
 
         // Layout: 2 columns x 2 rows of square panels so the plot area is
         // square and 1 pixel = the same number of meters on every axis.
@@ -1092,6 +1105,25 @@ fn bounds<I: Iterator<Item = f64>>(it: I) -> (f64, f64) {
         if v > hi { hi = v; }
     }
     (lo, hi)
+}
+
+/// Round `x` up to a "nice" value of the form k * 10^n where
+/// k ∈ {1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10}. Used for axis-span snapping.
+fn nice_ceil(x: f64) -> f64 {
+    if x <= 0.0 { return 1.0; }
+    let exp = x.log10().floor();
+    let base = 10f64.powf(exp);
+    let m = x / base;
+    let nice = if m <= 1.0 { 1.0 }
+        else if m <= 1.5 { 1.5 }
+        else if m <= 2.0 { 2.0 }
+        else if m <= 2.5 { 2.5 }
+        else if m <= 3.0 { 3.0 }
+        else if m <= 4.0 { 4.0 }
+        else if m <= 5.0 { 5.0 }
+        else if m <= 7.5 { 7.5 }
+        else { 10.0 };
+    nice * base
 }
 
 
