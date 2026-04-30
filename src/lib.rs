@@ -5,6 +5,9 @@ pub mod events;
 pub mod integrator;
 pub mod math;
 
+#[cfg(feature = "viz")]
+pub mod viz;
+
 use collision::sphere_sphere;
 use dynamics::RigidBody;
 use environment::Environment;
