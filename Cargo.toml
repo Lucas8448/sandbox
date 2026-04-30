@@ -23,6 +23,10 @@ crossterm = { version = "0.28", optional = true }
 name = "missile_viz"
 required-features = ["viz"]
 
+[[example]]
+name = "missile_viz_3d"
+required-features = ["viz"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

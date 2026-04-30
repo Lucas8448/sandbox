@@ -43,12 +43,13 @@ for _ in 0..10_000 {
 ```bash
 cargo run --example missile
 cargo run --example drone
-cargo run --example missile_viz --features viz   # animated ASCII scope
+cargo run --example missile_viz --features viz   # animated 2D ASCII scope
+cargo run --example missile_viz_3d --features viz # 3D perspective + orbit camera
 ```
 
 ## Features
 
-- `viz` — `AsciiScope` + `Marker` for animating bodies in the terminal via `crossterm`.
+- `viz` — `AsciiScope` + `Marker` + `Camera` for animating bodies in the terminal via `crossterm`. Supports both 2D ortho (`AsciiScope::new`) and 3D perspective with depth buffer and ground grid (`AsciiScope::new_3d`).
 
 ## License
 
