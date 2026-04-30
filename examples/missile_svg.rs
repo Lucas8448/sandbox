@@ -64,6 +64,8 @@ fn main() -> std::io::Result<()> {
     let path = "docs/missile_trajectory.svg";
     std::fs::create_dir_all("docs")?;
     rec.export_svg(path)?;
-    println!("Wrote {} ({} samples)", path, rec.samples.len());
+    let anim_path = "docs/missile_trajectory_animated.svg";
+    rec.export_svg_animated(anim_path)?;
+    println!("Wrote {} and {} ({} samples)", path, anim_path, rec.samples.len());
     Ok(())
 }

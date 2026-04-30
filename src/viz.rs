@@ -814,6 +814,18 @@ impl Recorder {
     /// Write a 2x2 SVG summary to `path`. Auto-fits the data range; pads by
     /// 5%. Pure string output, no external SVG crate.
     pub fn export_svg(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.export_svg_inner(path, false)
+    }
+
+    /// Like [`export_svg`], but emits SMIL animations so the trajectory
+    /// is drawn progressively (boost segment first, then coast) and a
+    /// moving dot follows the body's current position. Animation
+    /// duration matches the simulated flight time and loops indefinitely.
+    pub fn export_svg_animated(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.export_svg_inner(path, true)
+    }
+
+    fn export_svg_inner(&self, path: impl AsRef<std::path::Path>, animated: bool) -> std::io::Result<()> {
         if self.samples.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -863,7 +875,7 @@ impl Recorder {
 
         let mut s = String::new();
         s.push_str(&format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\">\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\">\n",
             w = total_w,
             h = total_h
         ));
@@ -886,8 +898,11 @@ impl Recorder {
         s.push_str("</style>\n");
         s.push_str(&format!("<rect class=\"bg\" width=\"{}\" height=\"{}\" />\n", total_w, total_h));
 
-        // Helper to draw a panel at (px, py).
-        let draw_panel = |s: &mut String, px: f64, py: f64, title: &str,
+        let t0 = self.samples.first().unwrap().t;
+        let t_end = self.samples.last().unwrap().t;
+        let anim_dur = (t_end - t0).max(0.001);
+        let mut panel_idx: usize = 0;
+        let mut draw_panel = |s: &mut String, px: f64, py: f64, title: &str,
                           xa: Axis, ya: Axis, xr: (f64, f64), yr: (f64, f64),
                           show_ground: bool| {
             s.push_str(&format!(
@@ -964,41 +979,132 @@ impl Recorder {
                 ));
             }
 
-            // Trajectory polylines, segmented by phase.
-            let mut current_phase = self.samples[0].phase;
-            let mut current_pts: Vec<(f64, f64)> = Vec::new();
-            let flush = |s: &mut String, phase: TracePhase, pts: &[(f64, f64)]| {
-                if pts.len() < 2 {
-                    return;
-                }
-                let class = match phase {
-                    TracePhase::Boost => "boost",
-                    TracePhase::Coast | TracePhase::Impact => "coast",
-                };
-                let mut d = String::new();
-                for (i, (x, y)) in pts.iter().enumerate() {
-                    if i == 0 {
-                        d.push_str(&format!("M {:.1} {:.1}", x, y));
-                    } else {
-                        d.push_str(&format!(" L {:.1} {:.1}", x, y));
-                    }
-                }
-                s.push_str(&format!("<path class=\"{}\" d=\"{}\" />\n", class, d));
+            // Trajectory polylines, segmented by phase. We collect each
+            // contiguous (phase, points, t_start, t_end) segment first,
+            // then emit them — animated mode needs the timing to schedule
+            // each segment's stroke-dashoffset animation.
+            #[derive(Clone)]
+            struct Seg {
+                phase: TracePhase,
+                pts: Vec<(f64, f64)>,
+                t_start: f64,
+                t_end: f64,
+            }
+            let mut segs: Vec<Seg> = Vec::new();
+            let mut cur = Seg {
+                phase: self.samples[0].phase,
+                pts: Vec::new(),
+                t_start: self.samples[0].t,
+                t_end: self.samples[0].t,
             };
             for sample in &self.samples {
                 let xv = xa.pick(sample.pos);
                 let yv = ya.pick(sample.pos);
                 let pt = (map_x(xv), map_y(yv));
-                if sample.phase != current_phase {
-                    // Carry the join point across so segments connect.
-                    current_pts.push(pt);
-                    flush(s, current_phase, &current_pts);
-                    current_phase = sample.phase;
-                    current_pts.clear();
+                if sample.phase != cur.phase {
+                    // Carry the join point so segments connect visually.
+                    cur.pts.push(pt);
+                    cur.t_end = sample.t;
+                    if cur.pts.len() >= 2 { segs.push(cur.clone()); }
+                    cur = Seg {
+                        phase: sample.phase,
+                        pts: Vec::new(),
+                        t_start: sample.t,
+                        t_end: sample.t,
+                    };
                 }
-                current_pts.push(pt);
+                cur.pts.push(pt);
+                cur.t_end = sample.t;
             }
-            flush(s, current_phase, &current_pts);
+            if cur.pts.len() >= 2 { segs.push(cur); }
+
+            let mut combined_d = String::new();
+            for (si, seg) in segs.iter().enumerate() {
+                let class = match seg.phase {
+                    TracePhase::Boost => "boost",
+                    TracePhase::Coast | TracePhase::Impact => "coast",
+                };
+                let mut d = String::new();
+                for (i, (x, y)) in seg.pts.iter().enumerate() {
+                    if i == 0 {
+                        d.push_str(&format!("M {:.1} {:.1}", x, y));
+                        if combined_d.is_empty() {
+                            combined_d.push_str(&format!("M {:.1} {:.1}", x, y));
+                        } else {
+                            combined_d.push_str(&format!(" L {:.1} {:.1}", x, y));
+                        }
+                    } else {
+                        d.push_str(&format!(" L {:.1} {:.1}", x, y));
+                        combined_d.push_str(&format!(" L {:.1} {:.1}", x, y));
+                    }
+                }
+                if animated {
+                    let mut len = 0.0_f64;
+                    for w in seg.pts.windows(2) {
+                        len += ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
+                    }
+                    let len = len.max(1.0);
+                    // Map this segment's [t_start, t_end] onto fractions
+                    // of the master loop, so all segments share one
+                    // dur=anim_dur cycle and stay in sync with the
+                    // moving body marker (also dur=anim_dur).
+                    let f0 = ((seg.t_start - t0) / anim_dur).clamp(0.0, 1.0);
+                    let f1 = ((seg.t_end   - t0) / anim_dur).clamp(0.0, 1.0);
+                    // Stay at L until f0; animate L -> 0 between f0..f1;
+                    // stay at 0 until 1. Skip degenerate keyTimes if
+                    // f0 == 0 or f1 == 1.
+                    let mut values: Vec<String> = Vec::new();
+                    let mut keys: Vec<String> = Vec::new();
+                    if f0 > 0.0 {
+                        values.push(format!("{:.1}", len));
+                        keys.push("0".to_string());
+                    }
+                    values.push(format!("{:.1}", len));
+                    keys.push(format!("{:.4}", f0));
+                    values.push("0".to_string());
+                    keys.push(format!("{:.4}", f1));
+                    if f1 < 1.0 {
+                        values.push("0".to_string());
+                        keys.push("1".to_string());
+                    }
+                    let _ = si;
+                    s.push_str(&format!(
+                        "<path class=\"{cls}\" d=\"{d}\" pathLength=\"{L:.1}\" \
+                         stroke-dasharray=\"{L:.1}\" stroke-dashoffset=\"{L:.1}\">\n\
+                         <animate attributeName=\"stroke-dashoffset\" \
+                         values=\"{V}\" keyTimes=\"{K}\" \
+                         dur=\"{T:.2}s\" repeatCount=\"indefinite\" />\n\
+                         </path>\n",
+                        cls = class,
+                        d = d,
+                        L = len,
+                        V = values.join(";"),
+                        K = keys.join(";"),
+                        T = anim_dur,
+                    ));
+                } else {
+                    s.push_str(&format!("<path class=\"{}\" d=\"{}\" />\n", class, d));
+                }
+            }
+
+            if animated && !combined_d.is_empty() {
+                // Hidden combined path drives the animateMotion for the
+                // moving body marker. Also acts as the timing master via
+                // a sentinel <animate id="loop"> on the panel <g>.
+                let path_id = format!("recpath_p{}", panel_idx);
+                s.push_str(&format!(
+                    "<path id=\"{id}\" d=\"{d}\" fill=\"none\" stroke=\"none\" />\n",
+                    id = path_id, d = combined_d,
+                ));
+                s.push_str(&format!(
+                    "<circle r=\"5\" fill=\"#5cff90\" stroke=\"#000\" stroke-width=\"0.6\">\n\
+                     <animateMotion dur=\"{T:.2}s\" repeatCount=\"indefinite\" rotate=\"0\">\n\
+                     <mpath xlink:href=\"#{id}\" href=\"#{id}\" />\n\
+                     </animateMotion>\n\
+                     </circle>\n",
+                    T = anim_dur, id = path_id,
+                ));
+            }
 
             // Impact marker if we recorded one.
             if let Some(last) = self.samples.last() {
@@ -1013,6 +1119,7 @@ impl Recorder {
             }
 
             s.push_str("</g>\n");
+            panel_idx += 1;
         };
 
         let p_side = (margin, margin);
@@ -1182,6 +1289,18 @@ impl MultiRecorder {
     }
 
     pub fn export_svg(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.export_svg_inner(path, false)
+    }
+
+    /// Like [`export_svg`], but emits SMIL animations so each track is
+    /// drawn progressively in real time and a moving dot follows the
+    /// current position. Animation duration matches the longest track
+    /// (in simulated seconds = wall-clock seconds, looped indefinitely).
+    pub fn export_svg_animated(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+        self.export_svg_inner(path, true)
+    }
+
+    fn export_svg_inner(&self, path: impl AsRef<std::path::Path>, animated: bool) -> std::io::Result<()> {
         if self.tracks.iter().all(|t| t.samples.is_empty()) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1223,7 +1342,7 @@ impl MultiRecorder {
 
         let mut s = String::new();
         s.push_str(&format!(
-            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\">\n",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"0 0 {w} {h}\" width=\"{w}\" height=\"{h}\">\n",
             w = total_w,
             h = total_h
         ));
@@ -1247,7 +1366,19 @@ impl MultiRecorder {
         s.push_str(&format!("<rect class=\"bg\" width=\"{}\" height=\"{}\" />\n", total_w, total_h));
 
         let tracks = &self.tracks;
-        let draw_panel = |s: &mut String, px: f64, py: f64, title: &str,
+        // Animation duration = longest track's elapsed simulated time.
+        let anim_dur = self
+            .tracks
+            .iter()
+            .filter_map(|t| {
+                let f = t.samples.first()?.t;
+                let l = t.samples.last()?.t;
+                Some(l - f)
+            })
+            .fold(0.0_f64, f64::max)
+            .max(0.001);
+        let mut panel_idx: usize = 0;
+        let mut draw_panel = |s: &mut String, px: f64, py: f64, title: &str,
                           xa: Axis, ya: Axis, xr: (f64, f64), yr: (f64, f64),
                           show_ground: bool| {
             s.push_str(&format!("<g transform=\"translate({px},{py})\">\n", px = px, py = py));
@@ -1289,7 +1420,7 @@ impl MultiRecorder {
             }
 
             // One polyline per track, in track color.
-            for track in tracks.iter() {
+            for (ti, track) in tracks.iter().enumerate() {
                 if track.samples.len() < 2 { continue; }
                 let mut d = String::new();
                 for (i, sample) in track.samples.iter().enumerate() {
@@ -1303,26 +1434,73 @@ impl MultiRecorder {
                         d.push_str(&format!(" L {:.1} {:.1}", px, py));
                     }
                 }
-                s.push_str(&format!(
-                    "<path class=\"track\" stroke=\"{}\" d=\"{}\" />\n",
-                    xml_escape(&track.color), d,
-                ));
-                // Start marker (hollow ring) and end marker (filled dot).
+                let path_id = format!("p{}t{}", panel_idx, ti);
+                if animated {
+                    // Approximate path length so we can use stroke-dasharray
+                    // to reveal the line progressively. SVG also exposes
+                    // pathLength; we set it explicitly to the same value
+                    // we pass to dasharray so the animation is exact.
+                    let mut len = 0.0_f64;
+                    let mut prev: Option<(f64, f64)> = None;
+                    for sample in &track.samples {
+                        let p = (map_x(xa.pick(sample.pos)), map_y(ya.pick(sample.pos)));
+                        if let Some(q) = prev {
+                            len += ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt();
+                        }
+                        prev = Some(p);
+                    }
+                    let len = len.max(1.0);
+                    s.push_str(&format!(
+                        "<path id=\"{id}\" class=\"track\" stroke=\"{c}\" d=\"{d}\" \
+                         pathLength=\"{L:.1}\" stroke-dasharray=\"{L:.1}\" \
+                         stroke-dashoffset=\"{L:.1}\">\n\
+                         <animate attributeName=\"stroke-dashoffset\" \
+                         values=\"{L:.1};0\" dur=\"{T:.2}s\" repeatCount=\"indefinite\" />\n\
+                         </path>\n",
+                        id = path_id,
+                        c = xml_escape(&track.color),
+                        d = d,
+                        L = len,
+                        T = anim_dur,
+                    ));
+                } else {
+                    s.push_str(&format!(
+                        "<path class=\"track\" stroke=\"{}\" d=\"{}\" />\n",
+                        xml_escape(&track.color), d,
+                    ));
+                }
+                // Start marker (hollow ring) is always visible.
                 let first = track.samples.first().unwrap();
-                let last = track.samples.last().unwrap();
                 let (sx, sy) = (map_x(xa.pick(first.pos)), map_y(ya.pick(first.pos)));
-                let (ex, ey) = (map_x(xa.pick(last.pos)), map_y(ya.pick(last.pos)));
                 s.push_str(&format!(
                     "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"none\" stroke=\"{}\" stroke-width=\"1.4\" />\n",
                     sx, sy, xml_escape(&track.color)
                 ));
-                s.push_str(&format!(
-                    "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"{}\" />\n",
-                    ex, ey, xml_escape(&track.color)
-                ));
+                if animated {
+                    // Moving dot follows the same path. animateMotion
+                    // walks the path geometry over `anim_dur` seconds.
+                    s.push_str(&format!(
+                        "<circle r=\"5\" fill=\"{c}\" stroke=\"#000\" stroke-width=\"0.6\">\n\
+                         <animateMotion dur=\"{T:.2}s\" repeatCount=\"indefinite\" rotate=\"0\">\n\
+                         <mpath xlink:href=\"#{id}\" href=\"#{id}\" />\n\
+                         </animateMotion>\n\
+                         </circle>\n",
+                        c = xml_escape(&track.color),
+                        T = anim_dur,
+                        id = path_id,
+                    ));
+                } else {
+                    let last = track.samples.last().unwrap();
+                    let (ex, ey) = (map_x(xa.pick(last.pos)), map_y(ya.pick(last.pos)));
+                    s.push_str(&format!(
+                        "<circle cx=\"{:.1}\" cy=\"{:.1}\" r=\"4\" fill=\"{}\" />\n",
+                        ex, ey, xml_escape(&track.color)
+                    ));
+                }
             }
 
             s.push_str("</g>\n");
+            panel_idx += 1;
         };
 
         let p_side = (margin, margin);

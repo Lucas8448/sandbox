@@ -135,9 +135,12 @@ fn main() -> std::io::Result<()> {
     let path = "docs/drones_formation.svg";
     std::fs::create_dir_all("docs")?;
     rec.export_svg(path)?;
+    let anim_path = "docs/drones_formation_animated.svg";
+    rec.export_svg_animated(anim_path)?;
     println!(
-        "Wrote {} ({} drones, {:.0} s, {} total samples)",
+        "Wrote {} and {} ({} drones, {:.0} s, {} total samples)",
         path,
+        anim_path,
         rec.tracks.len(),
         world.time(),
         rec.tracks.iter().map(|t| t.samples.len()).sum::<usize>(),
