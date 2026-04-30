@@ -1,6 +1,28 @@
 [package]
 name = "physics_sandbox"
 version = "0.1.0"
-edition = "2026"
+edition = "2024"
+rust-version = "1.85"
+description = "Small rigid-body physics sandbox with pluggable integrators, environments, collisions and an event bus. Optional retro ASCII terminal visualization."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Lucas8448/sandbox"
+homepage = "https://github.com/Lucas8448/sandbox"
+documentation = "https://docs.rs/physics_sandbox"
+readme = "README.md"
+keywords = ["physics", "simulation", "rigid-body", "rk4", "ascii"]
+categories = ["simulation", "science", "visualization"]
+
+[features]
+default = []
+viz = ["dep:crossterm"]
 
 [dependencies]
+crossterm = { version = "0.28", optional = true }
+
+[[example]]
+name = "missile_viz"
+required-features = ["viz"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
