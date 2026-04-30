@@ -822,19 +822,28 @@ impl Recorder {
         }
 
         let (xmin, xmax) = bounds(self.samples.iter().map(|s| s.pos.x));
-        let (ymin, ymax) = bounds(self.samples.iter().map(|s| s.pos.y));
+        let (_ymin, ymax) = bounds(self.samples.iter().map(|s| s.pos.y));
         let (zmin, zmax) = bounds(self.samples.iter().map(|s| s.pos.z));
 
-        // Clamp y_min to 0 (ground) for nicer axes.
-        let ymin = ymin.min(0.0);
+        // Equalize axis scales: every panel's m-per-pixel must match, so we
+        // pick the largest data span across X/Y/Z and use a window of that
+        // size for every axis. Y is anchored at the ground (y=0) so the
+        // ground line stays at the bottom of altitude panels; X and Z are
+        // centered on their data midpoints.
+        let span_x = (xmax - xmin).max(1.0);
+        let span_y = (ymax.max(0.0)).max(1.0); // anchored at 0
+        let span_z = (zmax - zmin).max(1.0);
+        let span = span_x.max(span_y).max(span_z) * 1.1;
+        let mid_x = (xmin + xmax) * 0.5;
+        let mid_z = (zmin + zmax) * 0.5;
+        let xr = (mid_x - span * 0.5, mid_x + span * 0.5);
+        let yr = (0.0_f64, span);
+        let zr = (mid_z - span * 0.5, mid_z + span * 0.5);
 
-        let xr = pad(xmin, xmax, 0.05);
-        let yr = pad(ymin.max(0.0), ymax, 0.05);
-        let zr = pad(zmin, zmax, 0.05);
-
-        // Layout: 2 columns × 2 rows of 600×400 panels.
-        let pw = 600.0_f64;
-        let ph = 400.0_f64;
+        // Layout: 2 columns x 2 rows of square panels so the plot area is
+        // square and 1 pixel = the same number of meters on every axis.
+        let pw = 560.0_f64;
+        let ph = 560.0_f64;
         let margin = 60.0_f64;
         let total_w = (pw * 2.0 + margin * 3.0) as i32;
         let total_h = (ph * 2.0 + margin * 3.0) as i32;
@@ -886,11 +895,17 @@ impl Recorder {
                 xa.label(), short_axis_label(xa), ya.label(), short_axis_label(ya),
             ));
 
-            // Plot area inside the panel.
-            let plot_l = 50.0;
-            let plot_r = pw - 15.0;
-            let plot_t = 45.0;
-            let plot_b = ph - 30.0;
+            // Plot area inside the panel. Forced square so the same number
+            // of meters spans the same number of pixels on both axes.
+            let inset_l = 60.0;
+            let inset_r = 20.0;
+            let inset_t = 50.0;
+            let inset_b = 40.0;
+            let plot_size = (pw - inset_l - inset_r).min(ph - inset_t - inset_b);
+            let plot_l = inset_l;
+            let plot_r = plot_l + plot_size;
+            let plot_t = inset_t;
+            let plot_b = plot_t + plot_size;
             let map_x = |v: f64| plot_l + (v - xr.0) / (xr.1 - xr.0) * (plot_r - plot_l);
             let map_y = |v: f64| plot_b - (v - yr.0) / (yr.1 - yr.0) * (plot_b - plot_t);
 
@@ -1079,10 +1094,6 @@ fn bounds<I: Iterator<Item = f64>>(it: I) -> (f64, f64) {
     (lo, hi)
 }
 
-fn pad(lo: f64, hi: f64, frac: f64) -> (f64, f64) {
-    let d = (hi - lo).max(1.0);
-    (lo - d * frac, hi + d * frac)
-}
 
 fn xml_escape<S: AsRef<str>>(s: S) -> String {
     s.as_ref()
