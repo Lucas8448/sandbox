@@ -77,12 +77,15 @@ impl RigidBody {
         self.force * (1.0 / self.mass)
     }
 
+    /// Angular acceleration in the same frame as `inertia` and
+    /// `angular_velocity` (the principal-axis / world-aligned frame).
+    /// Includes the gyroscopic / Euler term `ω × (I·ω)`, so a torque-free
+    /// body with non-isotropic inertia precesses correctly instead of
+    /// drifting linearly.
+    ///
+    /// I·ω̇ = τ − ω × (I·ω)
     pub fn angular_acceleration(&self) -> Vec3 {
-        Vec3::new(
-            self.torque.x / self.inertia.x,
-            self.torque.y / self.inertia.y,
-            self.torque.z / self.inertia.z,
-        )
+        angular_acceleration(self.torque, self.angular_velocity, self.inertia)
     }
 
     pub fn kinetic_energy(&self) -> f64 {
@@ -102,4 +105,20 @@ impl RigidBody {
     pub fn speed(&self) -> f64 {
         self.velocity.magnitude()
     }
+}
+
+/// Standalone form of `RigidBody::angular_acceleration` so integrators can
+/// evaluate the rotational ODE at intermediate states without mutating the body.
+pub fn angular_acceleration(torque: Vec3, angular_velocity: Vec3, inertia: Vec3) -> Vec3 {
+    let iw = Vec3::new(
+        inertia.x * angular_velocity.x,
+        inertia.y * angular_velocity.y,
+        inertia.z * angular_velocity.z,
+    );
+    let gyro = angular_velocity.cross(iw);
+    Vec3::new(
+        (torque.x - gyro.x) / inertia.x,
+        (torque.y - gyro.y) / inertia.y,
+        (torque.z - gyro.z) / inertia.z,
+    )
 }

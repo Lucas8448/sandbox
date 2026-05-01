@@ -1,6 +1,6 @@
 [package]
 name = "physics_sandbox"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 description = "Small rigid-body physics sandbox with pluggable integrators, environments, collisions and an event bus. Optional retro ASCII terminal visualization."

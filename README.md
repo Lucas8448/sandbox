@@ -127,6 +127,30 @@ multi.export_svg("formation.svg")?;
 multi.export_svg_animated("formation_animated.svg")?;
 ```
 
+## Accuracy knobs
+
+The defaults match v0.1.x: uniform gravity, constant air density. Opt into
+higher-fidelity physics on the `Environment`:
+
+```rust
+use physics_sandbox::{environment::Environment, math::Vec3};
+
+let env = Environment::earth()
+    // ρ(h) = ρ₀·exp(-h / 8500 m) — drag falls off correctly with altitude
+    .with_exponential_atmosphere(8500.0)
+    // |g(h)| = 9.81 · (R / (R+h))² — matters above a few km
+    .with_inverse_square_gravity(9.81, 6.371e6, Vec3::new(0.0, 1.0, 0.0));
+```
+
+Rotational dynamics now include the gyroscopic / Euler term `ω × (I·ω)`,
+so a torque-free body with non-equal principal moments of inertia
+precesses correctly and conserves both angular momentum and rotational
+kinetic energy (verified by `rk4_conserves_angular_momentum_for_torque_free_asymmetric_body`).
+
+Threshold events (`add_speed_threshold`, `add_altitude_threshold`) are
+edge-triggered: they fire on the step the value crosses the threshold,
+not every step it stays past it.
+
 ## Features
 
 - `viz` — opt-in terminal visualization and SVG export. Pulls in
